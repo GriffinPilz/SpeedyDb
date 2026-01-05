@@ -3,6 +3,7 @@ package main
 import (
 	"SpeedyDb/btree"
 	"SpeedyDb/btreeWriting"
+	"SpeedyDb/structuredDB"
 	"bufio"
 	"bytes"
 	"encoding/json"
@@ -27,6 +28,22 @@ var minKey, maxKey int
 var setMinMaxKey = false
 var tr = btree.New(32)
 
+type Pair struct {
+	Key string
+	Val any
+}
+
+type SeekPoints struct {
+	Start uint32 `json:"start"`
+	End   uint32 `json:"end"`
+}
+
+type Manifest struct {
+	BytesPerRow uint64                `json:"BytesPerRow"`
+	RowOrder    []string              `json:"RowOrder"`
+	SeekMap     map[string]SeekPoints `json:"SeekPoints"`
+}
+
 func createBtree(FilerFolderPath string) {
 	files, err := os.ReadDir(FilerFolderPath)
 	if err != nil {
@@ -39,11 +56,6 @@ func createBtree(FilerFolderPath string) {
 			filePaths = append(filePaths, path.Join(FilerFolderPath, file.Name()))
 		}
 	}
-}
-
-type Pair struct {
-	Key string
-	Val any
 }
 
 func printDecodeContext(dec *json.Decoder, data []byte, msg string) {
@@ -95,7 +107,6 @@ func readOrderedObject(dec *json.Decoder, data []byte) ([]Pair, error) {
 		pairs = append(pairs, Pair{Key: key, Val: v})
 	}
 
-	// Expect '}'
 	t, err = dec.Token()
 	if err != nil {
 		printDecodeContext(dec, data, "reading object end")
@@ -306,6 +317,60 @@ func importDataFromFile(filePath string, MaxMemorySize uint64, storagePath strin
 	fmt.Printf("NumGC = %d\n", m.NumGC)
 }
 
+func determineSeekPoints(user string, password string, url string, port string, schema string, table string) (rowBytes uint64, orderSlice []string, seekMap map[string]SeekPoints) {
+	rowBytes, columnSizeMap, orderSlice, err := structuredDB.GetRowSizeSQL(user, password, url, port, schema, table)
+	if err != nil {
+		log.Panic(err)
+	}
+
+	seekMap = make(map[string]SeekPoints, len(orderSlice))
+	var previousEndPoint uint32 = 0
+	for _, column := range orderSlice {
+		// -1 because we are including the bytes in the range. 8 bytes including 0 are position 0-7
+		size := uint32(columnSizeMap[column])
+
+		seekMap[column] = SeekPoints{
+			Start: previousEndPoint,
+			End:   previousEndPoint + size - 1,
+		}
+
+		previousEndPoint += size
+	}
+
+	fmt.Println("Row Size: ", rowBytes, ", Column Size: ", columnSizeMap, ", Order Slice: ", orderSlice, ", seekMap: ", seekMap)
+	return rowBytes, orderSlice, seekMap
+}
+
+func createManifest(rowBytes uint64, orderSlice []string, seekMap map[string]SeekPoints, workingDirectory string, tableName string) (string, error) {
+	f, err := os.OpenFile(
+		filepath.Join(workingDirectory, fmt.Sprintf("%s_manifest.json", tableName)),
+		os.O_CREATE|os.O_TRUNC|os.O_WRONLY,
+		0o644,
+	)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	w := bufio.NewWriter(f)
+	defer w.Flush()
+
+	m := Manifest{
+		BytesPerRow: rowBytes,
+		RowOrder:    orderSlice,
+		SeekMap:     seekMap,
+	}
+
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+
+	if err := enc.Encode(m); err != nil {
+		return "", err
+	}
+
+	return f.Name(), nil
+}
+
 func main() {
 	start := time.Now()
 	wd, err := os.Getwd()
@@ -315,6 +380,13 @@ func main() {
 
 	DataStoragePath := flag.String("f", wd, "Path to file storage folder")
 	MaxMemorySize := flag.Uint64("m", 10_737_418_240, "Maximum amount of memory to use. Default is 10 GB (10737418240)")
+	user := flag.String("user", "", "User for database extraction")
+	password := flag.String("password", "", "Password for database extraction")
+	url := flag.String("url", "127.0.0.1", "URL for database extraction")
+	port := flag.String("port", "3306", "Port for database extraction")
+	schema := flag.String("schema", "benchdb", "Schema for database extraction")
+	table := flag.String("table", "big10g", "Table for database extraction")
+
 	flag.Parse()
 	//uds := flag.String("uds", "/tmp/kvdb.sock", "UDS socket path")
 	//shards := flag.Int("shards", 64, "number of shards")
@@ -344,7 +416,13 @@ func main() {
 		createBtree(*DataStoragePath)
 	}
 
-	importDataFromFile("/Users/griffinpilz/GolandProjects/SpeedyDb/inputTest.txt", *MaxMemorySize, *DataStoragePath)
+	rowBytes, orderSlice, seekMap := determineSeekPoints(*user, *password, *url, *port, *schema, *table)
+	manifestFile, createManifestError := createManifest(rowBytes, orderSlice, seekMap, *DataStoragePath, fmt.Sprintf("%s_%s", *schema, *table))
+	if createManifestError != nil {
+		slog.Error("operation failed", "err", createManifestError)
+	}
+	fmt.Println("manifestFile:", manifestFile)
+	//importDataFromFile("/Users/griffinpilz/GolandProjects/SpeedyDb/inputTest.txt", *MaxMemorySize, *DataStoragePath)
 	elapsed := time.Since(start)
 	fmt.Println("elapsed:", elapsed)
 }

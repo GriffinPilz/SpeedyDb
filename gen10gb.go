@@ -18,7 +18,7 @@ var words = []string{
 var labels = []string{"hotel", "romeo", "whiskey", "bravo", "india", "kilo", "papa", "zulu", "echo", "delta", "juliet"}
 var names = []string{"kilo", "delta", "romeo", "zulu", "whiskey", "hotel", "india", "papa", "echo", "juliet", "xray", "golf", "tango", "oscar"}
 
-func main() {
+func GenerateSampleFile() {
 	out := flag.String("o", "inputTest.txt", "output file path")
 	target := flag.Int64("size", 10_737_418_240, "target size in bytes (default 10 GiB)")
 	seed := flag.Int64("seed", 42, "random seed")
